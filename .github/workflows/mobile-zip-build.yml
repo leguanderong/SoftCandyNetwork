@@ -3,12 +3,10 @@ name: 软糖网络-手机ZIP编译
 
 on:
   push:
-    branches:
-      - main
+    branches: [main]
     paths:
       - 'SoftCandyNetwork-Mobile-v1.0.3.zip'
       - '.github/workflows/mobile-zip-build.yml'
-
   workflow_dispatch:
 
 permissions:
@@ -30,13 +28,13 @@ jobs:
           distribution: temurin
           java-version: '21'
 
-      - name: 3. 安装 Go 1.26.8
+      - name: 3. 安装 Go
         uses: actions/setup-go@v5
         with:
           go-version: '1.26.8'
           cache: false
 
-      - name: 4. 安装 Android SDK
+      - name: 4. 初始化 Android SDK
         uses: android-actions/setup-android@v3
         with:
           cmdline-tools-version: '12266719'
@@ -47,67 +45,65 @@ jobs:
       - name: 5. 准备 Gradle
         uses: gradle/actions/setup-gradle@v4
 
-      - name: 6. 检查工程 ZIP
+      - name: 6. 解压工程
         shell: bash
         run: |
           set -euo pipefail
-
-          ZIP="SoftCandyNetwork-Mobile-v1.0.3.zip"
-
-          if [ ! -f "$ZIP" ]; then
-            echo "::error::找不到工程 ZIP 文件"
-            exit 1
-          fi
-
+          ZIP='SoftCandyNetwork-Mobile-v1.0.3.zip'
+          test -f "$ZIP"
           unzip -tq "$ZIP"
-          echo "工程 ZIP 完整性检查通过"
-
-      - name: 7. 解压工程
-        shell: bash
-        run: |
-          set -euo pipefail
-
           mkdir -p candy
-
-          unzip -q \
-            SoftCandyNetwork-Mobile-v1.0.3.zip \
-            -d candy
-
+          unzip -q "$ZIP" -d candy
           test -f candy/tooling/build_in_actions.sh
           test -f candy/tooling/patch_upstream.py
-          test -f candy/tooling/verify.py
-          test -f candy/assets/candy_provision.json
-          test -f candy/assets/route-v4.txt
 
-          echo "工程文件检查通过"
-
-      - name: 8. 检查服务器证书和191条路由
+      - name: 7. 验证证书与191条路由
         shell: bash
         run: |
           set -euo pipefail
+          python3 candy/tooling/verify.py --require-provision
 
-          cd candy
+      - name: 8. 修复 Android API 37
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
 
-          python3 tooling/verify.py \
-            --require-provision
+          p = Path('candy/tooling/build_in_actions.sh')
+          body = p.read_text(encoding='utf-8')
+
+          old = "sdkmanager 'ndk;29.0.14206865' 'platforms;android-37'"
+          new = "sdkmanager 'ndk;29.0.14206865' 'platforms;android-36' 'build-tools;36.0.0'"
+
+          anchor = 'python3 "${ROOT}/tooling/patch_upstream.py" upstream'
+
+          fix = '''sed -i 's/^targetSdk = "37"$/targetSdk = "36"/' upstream/gradle/libs.versions.toml
+          grep -q '^targetSdk = "36"$' upstream/gradle/libs.versions.toml || exit 1'''
+
+          assert body.count(old) == 1
+          assert body.count(anchor) == 1
+
+          body = body.replace(old, new, 1)
+          body = body.replace(anchor, anchor + '\n' + fix, 1)
+
+          p.write_text(body, encoding='utf-8')
+          print('Android SDK API 36 修复完成')
+          PY
+
+          bash -n candy/tooling/build_in_actions.sh
 
       - name: 9. 编译 Android APK
         shell: bash
         run: |
           set -euo pipefail
-
           bash candy/tooling/build_in_actions.sh
 
       - name: 10. 检查 APK
         shell: bash
         run: |
           set -euo pipefail
-
-          if ! compgen -G 'dist/*.apk' > /dev/null; then
-            echo "::error::未找到 APK 编译产物"
-            exit 1
-          fi
-
+          compgen -G 'dist/*.apk' > /dev/null
           ls -lh dist/
 
       - name: 11. 上传 APK
