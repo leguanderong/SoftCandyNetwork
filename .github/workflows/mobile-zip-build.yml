@@ -1,32 +1,119 @@
+
 name: 软糖网络-手机ZIP编译
+
 on:
   push:
-    branches: [main]
-    paths: ['SoftCandyNetwork-Mobile-v1.0.3.zip']
+    branches:
+      - main
+    paths:
+      - 'SoftCandyNetwork-Mobile-v1.0.3.zip'
+      - '.github/workflows/mobile-zip-build.yml'
+
   workflow_dispatch:
+
 permissions:
   contents: read
+
 jobs:
   build:
+    name: 编译软糖网络APK
     runs-on: ubuntu-24.04
     timeout-minutes: 90
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-java@v4
+      - name: 1. 检出仓库
+        uses: actions/checkout@v4
+
+      - name: 2. 安装 Java 21
+        uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '21'
-      - uses: actions/setup-go@v5
+
+      - name: 3. 安装 Go 1.26.8
+        uses: actions/setup-go@v5
         with:
           go-version: '1.26.8'
-      - uses: android-actions/setup-android@v3
-      - uses: gradle/actions/setup-gradle@v4
-      - name: 解压ZIP并编译
+          cache: false
+
+      - name: 4. 安装 Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          cmdline-tools-version: '12266719'
+          accept-android-sdk-licenses: true
+          log-accepted-android-sdk-licenses: false
+          packages: 'platform-tools'
+
+      - name: 5. 准备 Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: 6. 检查工程 ZIP
+        shell: bash
         run: |
-          unzip -q SoftCandyNetwork-Mobile-v1.0.3.zip -d candy
+          set -euo pipefail
+
+          ZIP="SoftCandyNetwork-Mobile-v1.0.3.zip"
+
+          if [ ! -f "$ZIP" ]; then
+            echo "::error::找不到工程 ZIP 文件"
+            exit 1
+          fi
+
+          unzip -tq "$ZIP"
+          echo "工程 ZIP 完整性检查通过"
+
+      - name: 7. 解压工程
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p candy
+
+          unzip -q \
+            SoftCandyNetwork-Mobile-v1.0.3.zip \
+            -d candy
+
+          test -f candy/tooling/build_in_actions.sh
+          test -f candy/tooling/patch_upstream.py
+          test -f candy/tooling/verify.py
+          test -f candy/assets/candy_provision.json
+          test -f candy/assets/route-v4.txt
+
+          echo "工程文件检查通过"
+
+      - name: 8. 检查服务器证书和191条路由
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd candy
+
+          python3 tooling/verify.py \
+            --require-provision
+
+      - name: 9. 编译 Android APK
+        shell: bash
+        run: |
+          set -euo pipefail
+
           bash candy/tooling/build_in_actions.sh
-      - uses: actions/upload-artifact@v4
+
+      - name: 10. 检查 APK
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if ! compgen -G 'dist/*.apk' > /dev/null; then
+            echo "::error::未找到 APK 编译产物"
+            exit 1
+          fi
+
+          ls -lh dist/
+
+      - name: 11. 上传 APK
+        uses: actions/upload-artifact@v4
         with:
           name: SoftCandyNetwork-v1.0.3-debug-apk
           path: dist/*
           if-no-files-found: error
+          retention-days: 30
