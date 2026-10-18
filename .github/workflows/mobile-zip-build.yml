@@ -1,4 +1,3 @@
-
 name: 软糖网络-手机ZIP编译
 
 on:
@@ -28,7 +27,7 @@ jobs:
           distribution: temurin
           java-version: '21'
 
-      - name: 3. 安装 Go
+      - name: 3. 安装 Go 1.26.8
         uses: actions/setup-go@v5
         with:
           go-version: '1.26.8'
@@ -45,66 +44,79 @@ jobs:
       - name: 5. 准备 Gradle
         uses: gradle/actions/setup-gradle@v4
 
-      - name: 6. 解压工程
+      - name: 6. 解压手机上传的 ZIP
         shell: bash
         run: |
           set -euo pipefail
           ZIP='SoftCandyNetwork-Mobile-v1.0.3.zip'
-          test -f "$ZIP"
+          test -f "$ZIP" || { echo '::error::工程 ZIP 不存在'; exit 1; }
           unzip -tq "$ZIP"
           mkdir -p candy
           unzip -q "$ZIP" -d candy
           test -f candy/tooling/build_in_actions.sh
           test -f candy/tooling/patch_upstream.py
+          test -f candy/tooling/verify.py
+          test -f candy/assets/candy_provision.json
+          test -f candy/assets/route-v4.txt
 
-      - name: 7. 验证证书与191条路由
-        shell: bash
-        run: |
-          set -euo pipefail
-          python3 candy/tooling/verify.py --require-provision
+      - name: 7. 验证服务器公开证书与 191 条路由
+        run: python3 candy/tooling/verify.py --require-provision
 
-      - name: 8. 修复 Android API 37
+      - name: 8. 修复 Android SDK 37.0 与构建脚本
         shell: bash
         run: |
           set -euo pipefail
           python3 - <<'PY'
           from pathlib import Path
 
-          p = Path('candy/tooling/build_in_actions.sh')
-          body = p.read_text(encoding='utf-8')
+          script = Path('candy/tooling/build_in_actions.sh')
+          body = script.read_text(encoding='utf-8')
 
-          old = "sdkmanager 'ndk;29.0.14206865' 'platforms;android-37'"
-          new = "sdkmanager 'ndk;29.0.14206865' 'platforms;android-36' 'build-tools;36.0.0'"
+          # SDK 37 在当前 SDK 仓库中发布为带次版本的 android-37.0。
+          old_install = "sdkmanager 'ndk;29.0.14206865' 'platforms;android-37'"
+          new_install = "sdkmanager --channel=3 --install 'ndk;29.0.14206865' 'platforms;android-37.0' 'build-tools;37.0.0'"
+          assert body.count(old_install) == 1, 'ZIP 内安装 SDK 的旧命令与预期不符'
+          body = body.replace(old_install, new_install, 1)
 
+          # 上游使用 compileSdk = targetSdk 变量；需显式指定 37.0。
+          # 目标 SDK 保持 36，因此 Android 16 设备可正常安装。
           anchor = 'python3 "${ROOT}/tooling/patch_upstream.py" upstream'
+          assert body.count(anchor) == 1, '未找到上游补丁入口'
+          sdk_patch = '''python3 - <<'PATCH_SDK'
+          from pathlib import Path
+          catalog = Path('upstream/gradle/libs.versions.toml')
+          s = catalog.read_text(encoding='utf-8')
+          assert 'targetSdk = "37"' in s, '版本目录与预期不符'
+          catalog.write_text(s.replace('targetSdk = "37"', 'targetSdk = "36"', 1), encoding='utf-8')
 
-          fix = '''sed -i 's/^targetSdk = "37"$/targetSdk = "36"/' upstream/gradle/libs.versions.toml
-          grep -q '^targetSdk = "36"$' upstream/gradle/libs.versions.toml || exit 1'''
-
-          assert body.count(old) == 1
-          assert body.count(anchor) == 1
-
-          body = body.replace(old, new, 1)
-          body = body.replace(anchor, anchor + '\n' + fix, 1)
-
-          p.write_text(body, encoding='utf-8')
-          print('Android SDK API 36 修复完成')
+          for module in ('app', 'hysteria'):
+              f = Path(f'upstream/{module}/build.gradle.kts')
+              t = f.read_text(encoding='utf-8')
+              old = 'compileSdk = libs.versions.targetSdk.get().toInt()'
+              assert t.count(old) == 1, f'{module}: compileSdk 配置不符合预期'
+              t = t.replace(old, 'compileSdk = 37\\n    compileSdkMinor = 0', 1)
+              f.write_text(t, encoding='utf-8')
+          print('Android 编译 API 37.0、运行目标 API 36 已配置')
+          PATCH_SDK'''
+          body = body.replace(anchor, anchor + '\n' + sdk_patch, 1)
+          script.write_text(body, encoding='utf-8')
+          print('SDK 37.0 构建补丁准备完成')
           PY
-
           bash -n candy/tooling/build_in_actions.sh
 
-      - name: 9. 编译 Android APK
+      - name: 9. 构建 HY2 核心及 Android APK
         shell: bash
         run: |
           set -euo pipefail
           bash candy/tooling/build_in_actions.sh
 
-      - name: 10. 检查 APK
+      - name: 10. 检查 APK 与校验值
         shell: bash
         run: |
           set -euo pipefail
-          compgen -G 'dist/*.apk' > /dev/null
+          compgen -G 'dist/*.apk' > /dev/null || { echo '::error::APK 未产生'; exit 1; }
           ls -lh dist/
+          cat dist/SHA256SUMS.txt
 
       - name: 11. 上传 APK
         uses: actions/upload-artifact@v4
